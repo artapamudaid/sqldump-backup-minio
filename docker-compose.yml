@@ -1,0 +1,38 @@
+services:
+  mariadb-server-1:
+    image: mariadb:10.3
+    container_name: mariadb-server-1
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpassword
+    ports:
+      - "3377:3306"
+    volumes:
+      - mariadb-server-1-data:/var/lib/mysql
+      - ./InitDB/init-server-1.sql:/docker-entrypoint-initdb.d/init-server-1.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mariadb-server-2:
+    image: mariadb:10.3
+    container_name: mariadb-server-2
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpassword
+    ports:
+      - "3388:3306"
+    volumes:
+      - mariadb-server-2-data:/var/lib/mysql
+      - ./InitDB/init-server-2.sql:/docker-entrypoint-initdb.d/init-server-2.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mariadb-server-1-data:
+  mariadb-server-2-data:

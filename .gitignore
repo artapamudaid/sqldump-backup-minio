@@ -1,0 +1,4 @@
+.env
+backup.env
+/backups
+/logs

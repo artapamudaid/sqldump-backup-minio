@@ -1,0 +1,29 @@
+services:
+  minio:
+    image: quay.io/minio/aistor/minio:latest
+    container_name: minio-aistor-server
+    environment:
+      # Mengambil nilai dari file .env
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    ports:
+      # Mengikat port secara aman ke IP spesifik yang ada di .env
+      - "${MINIO_BIND_IP}:${MINIO_SERVER_PORT}:9000"
+      - "${MINIO_BIND_IP}:${MINIO_BROWSER_PORT}:9001"
+    volumes:
+      - ${HOME}/minio/data:/mnt/data
+      - ${HOME}/minio/minio.license:/minio.license:ro
+      - ${HOME}/minio/certs:/etc/minio/certs:ro
+    restart: unless-stopped
+    command: >
+      minio server /mnt/data
+      --license /minio.license
+    networks:
+      - minio_network
+
+networks:
+  minio_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.16.250.0/24
