@@ -36,3 +36,10 @@ services:
 volumes:
   mariadb-server-1-data:
   mariadb-server-2-data:
+
+# Tambahkan bagian ini agar menggunakan Subnet IP yang aman
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.50.0.0/24
