@@ -26,6 +26,8 @@ MINIO_ALIAS="${MINIO_ALIAS:-minio-local}"
 MINIO_BUCKET="${MINIO_BUCKET:-database-backups}"
 BACKUP_DIR="${BACKUP_DIR:-${SCRIPT_DIR}/backups}"
 KEEP_LOCAL_BACKUP="${KEEP_LOCAL_BACKUP:-0}"
+MARIADB_USER="${MARIADB_USER:-root}"
+MARIADB_PASSWORD="${MARIADB_PASSWORD:-${MARIADB_ROOT_PASSWORD:-rootpassword}}"
 BACKUP_TARGETS="${BACKUP_TARGETS:-mariadb-server-1:server-1 mariadb-server-2:server-2}"
 
 log() {
@@ -48,8 +50,8 @@ cleanup_failed_backup() {
 
 list_databases() {
   local container="$1"
-  docker exec "$container" sh -c \
-    'exec mysql -uroot -p"$MARIADB_ROOT_PASSWORD" -Nse "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN (\"information_schema\", \"mysql\", \"performance_schema\", \"sys\") ORDER BY SCHEMA_NAME;"'
+  docker exec -e "MARIADB_USER=${MARIADB_USER}" -e "MYSQL_PWD=${MARIADB_PASSWORD}" "$container" sh -c \
+    'exec mysql -u"$MARIADB_USER" -Nse "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN (\"information_schema\", \"mysql\", \"performance_schema\", \"sys\") ORDER BY SCHEMA_NAME;"'
 }
 
 require_command docker
@@ -63,38 +65,67 @@ mkdir -p -- "$BACKUP_DIR"
 mc mb --ignore-existing "${MINIO_ALIAS}/${MINIO_BUCKET}" >/dev/null
 
 for target in $BACKUP_TARGETS; do
-  IFS=':' read -r container product requested_databases <<<"$target"
-  [[ -n "$container" && -n "$product" ]] \
-    || die "Target '$target' tidak valid. Gunakan container:produk[:database[,database...]]."
-  [[ "$product" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
-    || die "Nama produk '$product' hanya boleh berisi huruf, angka, titik, garis bawah, atau strip."
+  IFS=':' read -r -a target_parts <<<"$target"
+  [[ ${#target_parts[@]} -ge 2 ]] \
+    || die "Target '$target' tidak valid. Format yang didukung: container:produk[:database[,database...]][:user[:password]]."
 
-  docker inspect --type container "$container" >/dev/null 2>&1 \
-    || die "Container '$container' tidak ditemukan."
+  local_container="${target_parts[0]}"
+  local_product="${target_parts[1]}"
+  local_requested_databases="${target_parts[2]:-}"
+  local_db_user="${MARIADB_USER}"
+  local_db_password="${MARIADB_PASSWORD}"
 
-  if [[ -z "$requested_databases" || "$requested_databases" == "all" || "$requested_databases" == "all-databases" ]]; then
-    database_list="$(list_databases "$container")"
+  case ${#target_parts[@]} in
+    2)
+      ;;
+    3)
+      local_requested_databases="${target_parts[2]}"
+      ;;
+    4)
+      local_requested_databases="${target_parts[2]}"
+      local_db_user="${target_parts[3]}"
+      ;;
+    5)
+      local_requested_databases="${target_parts[2]}"
+      local_db_user="${target_parts[3]}"
+      local_db_password="${target_parts[4]}"
+      ;;
+    *)
+      die "Target '$target' terlalu banyak bagian. Gunakan format container:produk[:database[,database...]][:user[:password]]."
+      ;;
+  esac
+
+  [[ -n "$local_container" && -n "$local_product" ]] \
+    || die "Target '$target' tidak valid. Gunakan container:produk[:database[,database...]][:user[:password]]."
+  [[ "$local_product" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || die "Nama produk '$local_product' hanya boleh berisi huruf, angka, titik, garis bawah, atau strip."
+
+  docker inspect --type container "$local_container" >/dev/null 2>&1 \
+    || die "Container '$local_container' tidak ditemukan."
+
+  if [[ -z "$local_requested_databases" || "$local_requested_databases" == "all" || "$local_requested_databases" == "all-databases" ]]; then
+    database_list="$(docker exec -e "MARIADB_USER=${local_db_user}" -e "MYSQL_PWD=${local_db_password}" "$local_container" sh -c 'exec mysql -u"$MARIADB_USER" -Nse "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN (\"information_schema\", \"mysql\", \"performance_schema\", \"sys\") ORDER BY SCHEMA_NAME;"')"
   else
-    database_list="${requested_databases//,/ }"
+    database_list="${local_requested_databases//,/ }"
   fi
-  [[ -n "$database_list" ]] || die "Tidak ada database pengguna pada container '$container'."
+  [[ -n "$database_list" ]] || die "Tidak ada database pengguna pada container '$local_container'."
 
   for database_name in $database_list; do
     [[ "$database_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
       || die "Nama database '$database_name' hanya boleh berisi huruf, angka, titik, garis bawah, atau strip."
 
     file_name="${TIMESTAMP}_${database_name}.sql.gz"
-    final_file="${BACKUP_DIR}/${product}/${file_name}"
+    final_file="${BACKUP_DIR}/${local_product}/${file_name}"
     temporary_file="${final_file}.partial"
-    object_path="${MINIO_ALIAS}/${MINIO_BUCKET}/${product}/${DATE_FOLDER}/${file_name}"
+    object_path="${MINIO_ALIAS}/${MINIO_BUCKET}/${local_product}/${DATE_FOLDER}/${file_name}"
     mkdir -p -- "$(dirname -- "$final_file")"
 
-    log "Membuat dump ${database_name} dari ${container}..."
-    if ! docker exec "$container" sh -c \
-      "exec mysqldump -uroot -p\"\$MARIADB_ROOT_PASSWORD\" --databases \"${database_name}\" --single-transaction --routines --events --triggers --hex-blob --skip-lock-tables" \
+    log "Membuat dump ${database_name} dari ${local_container}..."
+    if ! docker exec -e "MARIADB_USER=${local_db_user}" -e "MYSQL_PWD=${local_db_password}" "$local_container" sh -c \
+      "exec mysqldump -u\"\$MARIADB_USER\" --databases \"${database_name}\" --single-transaction --routines --events --triggers --hex-blob --skip-lock-tables" \
       | gzip -c >"$temporary_file"; then
       cleanup_failed_backup "$temporary_file"
-      die "Dump database '$database_name' dari '$container' gagal."
+      die "Dump database '$database_name' dari '$local_container' gagal."
     fi
 
     mv -- "$temporary_file" "$final_file"
