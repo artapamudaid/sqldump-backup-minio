@@ -124,6 +124,9 @@ Arti konfigurasi:
 | `BACKUP_DIR` | Folder sementara untuk file `.sql.gz`. |
 | `KEEP_LOCAL_BACKUP` | `1` untuk menyimpan file lokal setelah upload, `0` untuk menghapusnya setelah upload sukses. |
 | `BACKUP_TARGETS` | Daftar target dengan format `container:aplikasi[:database[,database...]]`. |
+| `TELEGRAM_BOT_TOKEN` | Opsional, token bot Telegram untuk notifikasi sukses/gagal. |
+| `TELEGRAM_CHAT_ID` | Opsional, chat ID tujuan notifikasi Telegram. |
+| `TELEGRAM_THREAD_ID` | Opsional, topic/thread ID jika mengirim ke forum topic Telegram. |
 
 Jika bagian database dihilangkan atau bernilai `all`/`all-databases`, skrip mencari semua database pengguna pada container dan mengecualikan database sistem (`mysql`, `sys`, `information_schema`, dan `performance_schema`).
 
@@ -132,6 +135,15 @@ Contoh satu aplikasi dengan satu database:
 ```dotenv
 BACKUP_TARGETS="mariadb-hris:hris:hris_db"
 ```
+
+Contoh notifikasi Telegram:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=123456789:token_bot_telegram
+TELEGRAM_CHAT_ID=123456789
+```
+
+`TELEGRAM_BOT_TOKEN` didapat dari BotFather. `TELEGRAM_CHAT_ID` bisa didapat dengan mengirim pesan ke bot, lalu membuka `https://api.telegram.org/botTOKEN/getUpdates`.
 
 ## Menjalankan backup manual
 

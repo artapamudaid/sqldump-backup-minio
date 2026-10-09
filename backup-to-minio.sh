@@ -1,21 +1,3 @@
-#!/usr/bin/env bash
-# Backup setiap database MariaDB ke MinIO dalam format .sql.gz.
-#
-# Prasyarat:
-#   - Docker dan MinIO Client (mc) tersedia di host.
-#   - Alias mc telah dikonfigurasi, misalnya:
-#       mc alias set minio-local http://127.0.0.1:9110 USER_MINIO PASSWORD_MINIO
-#
-# Contoh:
-#   MINIO_BUCKET=database-backups ./backup-to-minio.sh
-#   KEEP_LOCAL_BACKUP=1 ./backup-to-minio.sh
-#
-# Format BACKUP_TARGETS: nama-container:produk[:database[,database...]]
-# Contoh:
-#   BACKUP_TARGETS="mariadb-hris:hris" ./backup-to-minio.sh
-#   BACKUP_TARGETS="mariadb-hris:hris:hris_db" ./backup-to-minio.sh
-# Hasil: database-backups/hris/20260915T010203Z_hris_db.sql.gz
-
 set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +11,10 @@ KEEP_LOCAL_BACKUP="${KEEP_LOCAL_BACKUP:-0}"
 MARIADB_USER="${MARIADB_USER:-root}"
 MARIADB_PASSWORD="${MARIADB_PASSWORD:-${MARIADB_ROOT_PASSWORD:-rootpassword}}"
 BACKUP_TARGETS="${BACKUP_TARGETS:-mariadb-server-1:server-1 mariadb-server-2:server-2}"
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+TELEGRAM_THREAD_ID="${TELEGRAM_THREAD_ID:-}"
+BACKUP_SUCCESS_COUNT=0
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" >&2
@@ -36,6 +22,7 @@ log() {
 
 die() {
   log "ERROR: $*"
+  notify_telegram "GAGAL: backup database ke MinIO gagal di host $(hostname). Error: $*"
   exit 1
 }
 
@@ -48,6 +35,27 @@ cleanup_failed_backup() {
   rm -f -- "$temporary_file"
 }
 
+notify_telegram() {
+  local message="$1"
+  local -a curl_args
+
+  [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || return 0
+
+  curl_args=(
+    -fsS
+    -X POST
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+    -d "chat_id=${TELEGRAM_CHAT_ID}"
+    -d "text=${message}"
+  )
+
+  if [[ -n "$TELEGRAM_THREAD_ID" ]]; then
+    curl_args+=(-d "message_thread_id=${TELEGRAM_THREAD_ID}")
+  fi
+
+  curl "${curl_args[@]}" >/dev/null || log "WARNING: Notifikasi Telegram gagal dikirim."
+}
+
 list_databases() {
   local container="$1"
   docker exec -e "MARIADB_USER=${MARIADB_USER}" -e "MYSQL_PWD=${MARIADB_PASSWORD}" "$container" sh -c \
@@ -57,6 +65,11 @@ list_databases() {
 require_command docker
 require_command mc
 require_command gzip
+if [[ -n "$TELEGRAM_BOT_TOKEN" || -n "$TELEGRAM_CHAT_ID" ]]; then
+  [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] \
+    || die "TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID harus diisi keduanya."
+  require_command curl
+fi
 
 docker info >/dev/null 2>&1 || die "Docker daemon tidak dapat diakses."
 mc ls "$MINIO_ALIAS" >/dev/null 2>&1 || die "Alias MinIO '$MINIO_ALIAS' tidak dapat diakses."
@@ -135,8 +148,11 @@ for target in $BACKUP_TARGETS; do
     fi
 
     log "Backup berhasil: ${object_path}"
+    BACKUP_SUCCESS_COUNT=$((BACKUP_SUCCESS_COUNT + 1))
     if [[ "$KEEP_LOCAL_BACKUP" != "1" ]]; then
       rm -f -- "$final_file"
     fi
   done
 done
+
+notify_telegram "SUKSES: backup database ke MinIO selesai di host $(hostname). Total file: ${BACKUP_SUCCESS_COUNT}. Bucket: ${MINIO_BUCKET}."
