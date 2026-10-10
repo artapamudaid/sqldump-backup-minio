@@ -1,7 +1,9 @@
+#!/usr/bin/env bash
+
 set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+readonly TIMESTAMP="$(TZ=Asia/Jakarta date +%Y%m%dT%H%M%S%z)"
 readonly DATE_FOLDER="$(TZ=Asia/Jakarta date +%F)"
 
 MINIO_ALIAS="${MINIO_ALIAS:-minio-local}"
