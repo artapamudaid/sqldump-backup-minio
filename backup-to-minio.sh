@@ -16,6 +16,10 @@ BACKUP_TARGETS="${BACKUP_TARGETS:-mariadb-server-1:server-1 mariadb-server-2:ser
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 TELEGRAM_THREAD_ID="${TELEGRAM_THREAD_ID:-}"
+BACKUP_LOG_FILE=""
+BACKUP_LOG_UPLOADED=0
+CURRENT_LOG_OBJECT_FOLDER=""
+CURRENT_LOG_PRODUCT=""
 BACKUP_SUCCESS_COUNT=0
 BACKUP_TOTAL_BYTES=0
 BACKUP_FOLDERS=()
@@ -24,12 +28,23 @@ declare -A BACKUP_FOLDER_BYTES=()
 declare -A BACKUP_FOLDER_LINES=()
 
 log() {
-  printf '[%s] %s\n' "$(date '+%F %T')" "$*" >&2
+  local line
+
+  line="$(printf '[%s] %s' "$(date '+%F %T')" "$*")"
+  printf '%s\n' "$line" >&2
+  if [[ -n "$BACKUP_LOG_FILE" ]]; then
+    printf '%s\n' "$line" >>"$BACKUP_LOG_FILE"
+  fi
 }
 
 die() {
+  local message
+
+  message="GAGAL: backup database ke MinIO gagal di host $(hostname). Error: $*"
   log "ERROR: $*"
-  notify_telegram "GAGAL: backup database ke MinIO gagal di host $(hostname). Error: $*"
+  append_backup_log_section "Ringkasan gagal" "$message"
+  upload_backup_log_to_minio
+  send_telegram_log_file "$message"
   exit 1
 }
 
@@ -42,51 +57,106 @@ cleanup_failed_backup() {
   rm -f -- "$temporary_file"
 }
 
-notify_telegram() {
-  local message="$1"
-  local line
-  local chunk=""
-  local max_length=3500
+cleanup_backup_log_file() {
+  if [[ -n "$BACKUP_LOG_FILE" ]]; then
+    rm -f -- "$BACKUP_LOG_FILE"
+  fi
+  BACKUP_LOG_FILE=""
+  BACKUP_LOG_UPLOADED=0
+  CURRENT_LOG_OBJECT_FOLDER=""
+  CURRENT_LOG_PRODUCT=""
+}
 
-  [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || return 0
+init_backup_log_file() {
+  local product="$1"
+  local container="$2"
 
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if (( ${#chunk} > 0 && ${#chunk} + ${#line} + 1 > max_length )); then
-      notify_telegram_chunk "$chunk"
-      chunk=""
-    fi
+  cleanup_backup_log_file
 
-    if (( ${#chunk} == 0 )); then
-      chunk="$line"
-    else
-      chunk+=$'\n'"$line"
-    fi
-  done <<<"$message"
+  BACKUP_LOG_FILE="$(mktemp "/tmp/backup-to-minio-${TIMESTAMP}.XXXXXX.txt")"
+  BACKUP_LOG_UPLOADED=0
+  CURRENT_LOG_PRODUCT="$product"
+  CURRENT_LOG_OBJECT_FOLDER="${MINIO_BUCKET}/${product}/${DATE_FOLDER}"
+  trap cleanup_backup_log_file EXIT
+  {
+    printf 'Log backup database ke MinIO\n'
+    printf 'Host: %s\n' "$(hostname)"
+    printf 'Waktu: %s\n' "$(date '+%F %T %Z')"
+    printf 'Bucket: %s\n' "$MINIO_BUCKET"
+    printf 'Target: %s\n' "$product"
+    printf 'Container: %s\n' "$container"
+    printf '\n'
+  } >>"$BACKUP_LOG_FILE"
+}
 
-  if [[ -n "$chunk" ]]; then
-    notify_telegram_chunk "$chunk"
+upload_backup_log_to_minio() {
+  local log_object_path
+
+  [[ -n "$BACKUP_LOG_FILE" && -f "$BACKUP_LOG_FILE" ]] || return 0
+  [[ -n "$CURRENT_LOG_OBJECT_FOLDER" && -n "$CURRENT_LOG_PRODUCT" ]] || return 0
+  (( BACKUP_LOG_UPLOADED == 0 )) || return 0
+
+  log_object_path="${MINIO_ALIAS}/${CURRENT_LOG_OBJECT_FOLDER}/backup-to-minio-${TIMESTAMP}_${CURRENT_LOG_PRODUCT}.txt"
+
+  if mc mb --ignore-existing "${MINIO_ALIAS}/${MINIO_BUCKET}" >/dev/null 2>&1 \
+    && mc cp "$BACKUP_LOG_FILE" "$log_object_path" >/dev/null 2>&1; then
+    BACKUP_LOG_UPLOADED=1
+  else
+    printf '[%s] WARNING: File log gagal diunggah ke MinIO: %s\n' "$(date '+%F %T')" "$log_object_path" >&2
   fi
 }
 
-notify_telegram_chunk() {
+notify_telegram() {
   local message="$1"
+
+  [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || return 0
+
+  [[ -n "$BACKUP_LOG_FILE" ]] || return 0
+
+  {
+    printf '\n%s\n' "$message"
+  } >>"$BACKUP_LOG_FILE"
+
+  send_telegram_log_file "$message"
+}
+
+append_backup_log_section() {
+  local title="$1"
+  local body="$2"
+
+  [[ -n "$BACKUP_LOG_FILE" ]] || return 0
+
+  {
+    printf '\n%s\n' "$title"
+    printf '%s\n' "$body"
+  } >>"$BACKUP_LOG_FILE"
+}
+
+send_telegram_log_file() {
+  local caption="$1"
   local -a curl_args
 
   [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || return 0
+  [[ -n "$BACKUP_LOG_FILE" && -f "$BACKUP_LOG_FILE" ]] || return 0
+
+  if (( ${#caption} > 900 )); then
+    caption="${caption:0:897}..."
+  fi
 
   curl_args=(
     -fsS
     -X POST
-    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-    -d "chat_id=${TELEGRAM_CHAT_ID}"
-    -d "text=${message}"
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+    -F "chat_id=${TELEGRAM_CHAT_ID}"
+    -F "caption=${caption}"
+    -F "document=@${BACKUP_LOG_FILE};filename=backup-to-minio-${TIMESTAMP}_${CURRENT_LOG_PRODUCT}.txt"
   )
 
   if [[ -n "$TELEGRAM_THREAD_ID" ]]; then
-    curl_args+=(-d "message_thread_id=${TELEGRAM_THREAD_ID}")
+    curl_args+=(-F "message_thread_id=${TELEGRAM_THREAD_ID}")
   fi
 
-  curl "${curl_args[@]}" >/dev/null || log "WARNING: Notifikasi Telegram gagal dikirim."
+  curl "${curl_args[@]}" >/dev/null || log "WARNING: File log Telegram gagal dikirim."
 }
 
 human_size() {
@@ -95,15 +165,15 @@ human_size() {
   awk -v bytes="$bytes" 'BEGIN {
     split("B KiB MiB GiB TiB", unit, " ")
     size = bytes + 0
-    index = 1
-    while (size >= 1024 && index < 5) {
+    unit_index = 1
+    while (size >= 1024 && unit_index < 5) {
       size = size / 1024
-      index++
+      unit_index++
     }
-    if (index == 1) {
-      printf "%d %s", size, unit[index]
+    if (unit_index == 1) {
+      printf "%d %s", size, unit[unit_index]
     } else {
-      printf "%.2f %s", size, unit[index]
+      printf "%.2f %s", size, unit[unit_index]
     }
   }'
 }
@@ -136,6 +206,15 @@ build_success_summary_message() {
   printf '%s' "$message"
 }
 
+reset_target_summary() {
+  BACKUP_SUCCESS_COUNT=0
+  BACKUP_TOTAL_BYTES=0
+  BACKUP_FOLDERS=()
+  BACKUP_FOLDER_COUNTS=()
+  BACKUP_FOLDER_BYTES=()
+  BACKUP_FOLDER_LINES=()
+}
+
 track_folder_summary() {
   local folder="$1"
   local bytes="$2"
@@ -166,14 +245,18 @@ notify_success_telegram() {
   local folder
   local folder_size
   local message
+  local summary
 
-  notify_telegram "$(build_success_summary_message)"
+  summary="$(build_success_summary_message)"
+  append_backup_log_section "Ringkasan sukses" "$summary"
 
   for folder in "${BACKUP_FOLDERS[@]}"; do
     folder_size="$(human_size "${BACKUP_FOLDER_BYTES[$folder]}")"
     message="$(printf 'List database: %s\nTotal DB: %s\nTotal SQL.GZ: %s\n\n%s' "$folder" "${BACKUP_FOLDER_COUNTS[$folder]}" "$folder_size" "${BACKUP_FOLDER_LINES[$folder]}")"
-    notify_telegram "$message"
+    append_backup_log_section "Detail ${folder}" "$message"
   done
+
+  send_telegram_log_file "$summary"
 }
 
 require_command docker
@@ -181,6 +264,7 @@ require_command mc
 require_command gzip
 require_command awk
 require_command stat
+require_command mktemp
 if [[ -n "$TELEGRAM_BOT_TOKEN" || -n "$TELEGRAM_CHAT_ID" ]]; then
   [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] \
     || die "TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID harus diisi keduanya."
@@ -228,6 +312,9 @@ for target in $BACKUP_TARGETS; do
     || die "Target '$target' tidak valid. Gunakan container:produk[:database[,database...]][:user[:password]]."
   [[ "$local_product" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
     || die "Nama produk '$local_product' hanya boleh berisi huruf, angka, titik, garis bawah, atau strip."
+
+  reset_target_summary
+  init_backup_log_file "$local_product" "$local_container"
 
   docker inspect --type container "$local_container" >/dev/null 2>&1 \
     || die "Container '$local_container' tidak ditemukan."
@@ -282,6 +369,8 @@ for target in $BACKUP_TARGETS; do
       rm -f -- "$final_file"
     fi
   done
-done
 
-notify_success_telegram
+  notify_success_telegram
+  upload_backup_log_to_minio
+  cleanup_backup_log_file
+done

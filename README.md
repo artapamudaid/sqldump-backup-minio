@@ -19,16 +19,27 @@ Hasil upload di MinIO menggunakan struktur berikut:
 BUCKET/
 └── NAMA_APLIKASI/
     └── YYYY-MM-DD/
-        └── YYYYMMDDTHHMMSSZ_nama_database.sql.gz
+        ├── YYYYMMDDTHHMMSSZ_nama_database.sql.gz
+        └── backup-to-minio-YYYYMMDDTHHMMSSZ_NAMA_APLIKASI.txt
 ```
 
 Contoh:
 
 ```text
-backup-maria-db/app-1/2026-09-15/20260915T170500Z_hris_db.sql.gz
+database-backups/
+├── server-1/
+│   └── 2026-10-13/
+│       ├── 20261013T000500+0700_hris_db.sql.gz
+│       ├── 20261013T000500+0700_finance_db.sql.gz
+│       └── backup-to-minio-20261013T000500+0700_server-1.txt
+└── server-2/
+    └── 2026-10-13/
+        ├── 20261013T000500+0700_crm_db.sql.gz
+        ├── 20261013T000500+0700_inventory_db.sql.gz
+        └── backup-to-minio-20261013T000500+0700_server-2.txt
 ```
 
-Folder tanggal selalu memakai zona waktu `Asia/Jakarta`. Timestamp pada nama file mencegah file tertimpa jika backup dilakukan lebih dari sekali sehari.
+Folder tanggal selalu memakai zona waktu `Asia/Jakarta`. Timestamp pada nama file mencegah file tertimpa jika backup dilakukan lebih dari sekali sehari. File `.txt` berisi log sukses atau gagal untuk target tersebut.
 
 ## Prasyarat
 
@@ -123,9 +134,9 @@ Arti konfigurasi:
 | `MINIO_BUCKET` | Bucket tujuan; akan dibuat otomatis bila belum ada. |
 | `BACKUP_DIR` | Folder sementara untuk file `.sql.gz`. |
 | `KEEP_LOCAL_BACKUP` | `1` untuk menyimpan file lokal setelah upload, `0` untuk menghapusnya setelah upload sukses. |
-| `BACKUP_TARGETS` | Daftar target dengan format `container:aplikasi[:database[,database...]]`. |
-| `TELEGRAM_BOT_TOKEN` | Opsional, token bot Telegram untuk notifikasi sukses/gagal. |
-| `TELEGRAM_CHAT_ID` | Opsional, chat ID tujuan notifikasi Telegram. |
+| `BACKUP_TARGETS` | Daftar target dengan format `container:aplikasi[:database[,database...]]`; setiap target menghasilkan folder, file log, dan notifikasi Telegram sendiri. |
+| `TELEGRAM_BOT_TOKEN` | Opsional, token bot Telegram untuk mengirim file log `.txt` saat sukses/gagal. |
+| `TELEGRAM_CHAT_ID` | Opsional, chat ID tujuan file log Telegram. |
 | `TELEGRAM_THREAD_ID` | Opsional, topic/thread ID jika mengirim ke forum topic Telegram. |
 
 Jika bagian database dihilangkan atau bernilai `all`/`all-databases`, skrip mencari semua database pengguna pada container dan mengecualikan database sistem (`mysql`, `sys`, `information_schema`, dan `performance_schema`).
@@ -136,14 +147,48 @@ Contoh satu aplikasi dengan satu database:
 BACKUP_TARGETS="mariadb-hris:hris:hris_db"
 ```
 
-Contoh notifikasi Telegram:
+Contoh beberapa target:
+
+```dotenv
+BACKUP_TARGETS="mariadb-server-1:server-1 mariadb-server-2:server-2"
+```
+
+Dengan contoh tersebut, backup dan log masuk ke folder `server-1/YYYY-MM-DD/` dan `server-2/YYYY-MM-DD/`. Jika Telegram aktif, bot mengirim dua pesan: satu untuk `server-1` dan satu untuk `server-2`.
+
+Contoh pengiriman file log Telegram:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456789:token_bot_telegram
 TELEGRAM_CHAT_ID=123456789
 ```
 
-`TELEGRAM_BOT_TOKEN` didapat dari BotFather. `TELEGRAM_CHAT_ID` bisa didapat dengan mengirim pesan ke bot, lalu membuka `https://api.telegram.org/botTOKEN/getUpdates`.
+`TELEGRAM_BOT_TOKEN` didapat dari BotFather. `TELEGRAM_CHAT_ID` bisa didapat dengan mengirim pesan ke bot, lalu membuka `https://api.telegram.org/botTOKEN/getUpdates`. Jika variabel Telegram diisi, skrip mengirim satu chat singkat per target sebagai caption dan melampirkan file log `.txt` target tersebut. File log sukses/gagal juga diunggah ke MinIO pada folder target yang sama: `aplikasi/YYYY-MM-DD/`.
+
+Placeholder caption Telegram sukses:
+
+```text
+SUKSES: backup database ke MinIO selesai.
+Host: nama-server
+Bucket: database-backups
+Tanggal folder: 2026-10-13
+Total database/file: 2
+Total ukuran SQL.GZ: 30.10 MiB
+
+Ringkasan folder:
+- database-backups/server-1/2026-10-13: 2 DB, SQL.GZ 30.10 MiB
+```
+
+Placeholder caption Telegram gagal:
+
+```text
+GAGAL: backup database ke MinIO gagal di host nama-server. Error: Dump database 'hris_db' dari 'mariadb-server-1' gagal.
+```
+
+Lampiran Telegram menggunakan nama seperti:
+
+```text
+backup-to-minio-20261013T000500+0700_server-1.txt
+```
 
 ## Menjalankan backup manual
 
