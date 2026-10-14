@@ -31,10 +31,24 @@ log() {
   local line
 
   line="$(printf '[%s] %s' "$(date '+%F %T')" "$*")"
-  printf '%s\n' "$line" >&2
   if [[ -n "$BACKUP_LOG_FILE" ]]; then
     printf '%s\n' "$line" >>"$BACKUP_LOG_FILE"
   fi
+}
+
+status_success() {
+  printf 'BERHASIL: database %s berhasil di-backup. Ukuran awal: %s, ukuran akhir: %s.\n' "$1" "$2" "$3" >&2
+}
+
+status_failed() {
+  printf 'GAGAL: %s\n' "$1" >&2
+}
+
+die_database() {
+  local database_name="$1"
+  local reason="$2"
+
+  die "database ${database_name} gagal di-backup. Alasan: ${reason}"
 }
 
 die() {
@@ -42,6 +56,7 @@ die() {
 
   message="GAGAL: backup database ke MinIO gagal di host $(hostname). Error: $*"
   log "ERROR: $*"
+  status_failed "$*"
   append_backup_log_section "Ringkasan gagal" "$message"
   upload_backup_log_to_minio
   send_telegram_log_file "$message"
@@ -338,10 +353,10 @@ for target in $BACKUP_TARGETS; do
     mkdir -p -- "$(dirname -- "$final_file")"
 
     if ! database_bytes="$(database_size_bytes "$local_container" "$database_name" "$local_db_user" "$local_db_password")"; then
-      die "Gagal membaca ukuran database '$database_name' dari '$local_container'."
+      die_database "$database_name" "gagal membaca ukuran dari container '$local_container'."
     fi
     [[ "$database_bytes" =~ ^[0-9]+$ ]] \
-      || die "Ukuran database '$database_name' dari '$local_container' tidak valid: ${database_bytes}"
+      || die_database "$database_name" "ukuran dari container '$local_container' tidak valid: ${database_bytes}"
     database_size="$(human_size "$database_bytes")"
 
     log "Membuat dump ${database_name} dari ${local_container}..."
@@ -349,7 +364,7 @@ for target in $BACKUP_TARGETS; do
       "exec mysqldump -u\"\$MARIADB_USER\" --databases \"${database_name}\" --single-transaction --routines --events --triggers --hex-blob --skip-lock-tables" \
       | gzip -c >"$temporary_file"; then
       cleanup_failed_backup "$temporary_file"
-      die "Dump database '$database_name' dari '$local_container' gagal."
+      die_database "$database_name" "dump dari container '$local_container' gagal."
     fi
 
     mv -- "$temporary_file" "$final_file"
@@ -357,10 +372,11 @@ for target in $BACKUP_TARGETS; do
     backup_size="$(human_size "$backup_bytes")"
     log "Mengunggah ${file_name} ke ${object_path}..."
     if ! mc cp "$final_file" "$object_path"; then
-      die "Upload gagal. Salinan lokal dipertahankan di '$final_file'."
+      die_database "$database_name" "upload ke MinIO gagal. Salinan lokal dipertahankan di '$final_file'."
     fi
 
     log "Backup berhasil: ${object_path}"
+    status_success "$database_name" "$database_size" "$backup_size"
     BACKUP_SUCCESS_COUNT=$((BACKUP_SUCCESS_COUNT + 1))
     BACKUP_TOTAL_BYTES=$((BACKUP_TOTAL_BYTES + backup_bytes))
     track_folder_summary "$object_folder" "$backup_bytes"
